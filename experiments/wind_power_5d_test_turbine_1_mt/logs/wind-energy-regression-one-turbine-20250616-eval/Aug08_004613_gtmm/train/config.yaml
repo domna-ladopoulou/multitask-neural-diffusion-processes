@@ -1,0 +1,42 @@
+batch_size: 32
+data_dir: data
+dataset: wind_data_5d_test_turbine_1
+dataset_name: wind_data_5d_test_turbine_1
+diffusion:
+  beta_end: 0.5
+  beta_start: 0.0003
+  schedule: cosine
+  timesteps: 500
+eval:
+  batch_size: 1
+  float64: false
+  n_conditional_sample_with_repaint: false
+  n_samples_per_function: 100
+  num_function_samples: 90
+input_dim: 5
+loss_type: l1
+n_function_samples_per_epoch: 500
+network:
+  hidden_dim: 64
+  n_layers: 4
+  num_heads: 8
+num_epochs: 250
+optimizer:
+  ema_rate: 0.995
+  end_lr: 1.0e-05
+  init_lr: 2.0e-05
+  num_decay_epochs: 200
+  num_warmup_epochs: 20
+  peak_lr: 0.001
+restore: logs/wind-energy-regression-one-turbine-20250616-eval/Aug08_004613_gtmm
+schedule:
+  beta_end: 0.5
+  beta_start: 0.0003
+  schedule: cosine
+  timesteps: 500
+seed: 42
+task_encoder:
+  embed_dim: 8
+  hidden_dim: 64
+  n_layers: 4
+test_turbine_id: 1

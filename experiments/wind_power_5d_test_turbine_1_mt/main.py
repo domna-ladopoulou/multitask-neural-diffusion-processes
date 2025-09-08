@@ -1,0 +1,570 @@
+from typing import Mapping, Tuple
+import os
+import pprint
+import string
+import random
+import datetime
+import pathlib
+import pickle
+import jax
+import haiku as hk
+import jax.numpy as jnp
+import tqdm
+import numpy as np
+import tensorflow as tf
+import tensorflow_datasets as tfds
+import matplotlib.pyplot as plt
+import optax
+from functools import partial
+from dataclasses import asdict
+
+# from gpjax import linops as jaxlinop
+import jaxlinop
+from gpjax.gaussian_distribution import GaussianDistribution
+
+# Disable all GPUs for TensorFlow. Load data using CPU.
+tf.config.set_visible_devices([], 'GPU')
+AUTOTUNE = tf.data.experimental.AUTOTUNE
+
+from ml_tools.config_utils import setup_config
+from ml_tools.state_utils import TrainingState
+from ml_tools import state_utils
+from ml_tools import writers
+from ml_tools import actions
+
+import mt_ndp as ndp
+from mt_ndp.types import Dataset, Batch, Rng
+from mt_ndp.model import BiDimensionalAttentionModel
+from mt_ndp.process import cosine_schedule, GaussianDiffusion
+from mt_ndp.model import SetEncoder
+
+from config import Config
+
+import logging
+logger = logging.getLogger("5d_mt")
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    fmt="%(asctime)s - %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+EXPERIMENT = "wind-energy-regression-one-turbine-20250616-eval"
+EXPERIMENT_NAME = None
+DATETIME = datetime.datetime.now().strftime("%b%d_%H%M%S")
+HERE = pathlib.Path(__file__).parent
+LOG_DIR = 'logs'
+
+
+def get_experiment_name(config: Config):
+    del config  # Currently not used but name could be based on config
+    global EXPERIMENT_NAME
+
+    if EXPERIMENT_NAME is None:
+        letters = string.ascii_lowercase
+        id = ''.join(random.choice(letters) for i in range(4))
+        EXPERIMENT_NAME = f"{DATETIME}_{id}"
+
+    return EXPERIMENT_NAME
+
+
+def get_experiment_dir(config: Config, output: str = "root", exist_ok: bool = True) -> pathlib.Path:
+    if config.restore != "":
+        experiment_name = config.restore.split("/")[-1]
+        logger.warning(f"As using restored model - experiment name is {experiment_name}")
+    else:
+        experiment_name = get_experiment_name(config)
+        logger.warning(f"Creating new experiment name {experiment_name}")
+
+    root = HERE / LOG_DIR / EXPERIMENT / experiment_name
+
+    if output == "root":
+        dir_ = root
+    elif output == "plots":
+        dir_ = root / "plots"
+    elif output == "tensorboard":
+        # All tensorboard logs are stored in a single directory
+        # Run tensorboard with:
+        # tensorboard --logdir logs/{EXPERIMENT-NAME}/tensorboard
+        dir_ = HERE / LOG_DIR / EXPERIMENT / "tensorboard" / experiment_name
+    elif output == "batches":
+        dir_ = root / "batches"
+    else:
+        raise ValueError("Unknown output: %s" % output)
+
+    dir_.mkdir(parents=True, exist_ok=exist_ok)
+    return dir_
+
+
+def get_data(
+    dataset: str,
+    input_dim: int = 1,
+    train: bool = True,
+    batch_size: int = 32,
+    num_epochs: int = 1,
+    test_turbine_id: int | None = None,
+) -> Dataset:
+    assert test_turbine_id is not None
+    task = "training" if train else "interpolation"
+    data_path = pathlib.Path(__file__).parent.parent / "../data" / f"{dataset}/{task}.npz"
+    logger.info(f"Loading data from {data_path} for {train = }")
+    data = np.load(data_path)
+
+    if train:
+        ds = tf.data.Dataset.from_tensor_slices({
+            "x_target": data["x_target"].astype(np.float32),
+            "y_target": data["y_target"].astype(np.float32),
+            "x_context": data["mt_x_context"].astype(np.float32),
+            "y_context": data["mt_y_context"].astype(np.float32),
+            "mask_context": data["mt_mask_context"].astype(np.float32),
+            # "mask_target": data["mask_target"].astype(np.float32),
+            # "turbine_id": data["train_turbine_id"].astype(np.float32)
+        })
+    else:
+        ds = tf.data.Dataset.from_tensor_slices({
+            "x_target": data["x_target"].astype(np.float32),
+            "y_target": data["y_target"].astype(np.float32),
+            "x_context": data["x_context"].astype(np.float32),
+            "y_context": data["y_context"].astype(np.float32),
+            "mask_context": data["mask_context"].astype(np.float32),
+            # "mask_target": data["mask_target"].astype(np.float32),
+            # "turbine_id": jnp.ones_like(data["mask_context"].astype(np.float32)[:, 0]) * test_turbine_id
+        })
+
+    if train:
+        ds = ds.repeat(count=num_epochs)
+        ds = ds.shuffle(seed=42, buffer_size=10000)
+    ds = ds.batch(batch_size, drop_remainder=True)
+    ds = ds.prefetch(AUTOTUNE)
+    ds = ds.as_numpy_iterator()
+    return map(lambda d: Batch(**d), ds)
+
+
+config: Config = setup_config(Config)
+TEST_TURBINE_ID = config.test_turbine_id
+
+key = jax.random.PRNGKey(config.seed)
+beta_t = cosine_schedule(config.diffusion.beta_start, config.diffusion.beta_end, config.diffusion.timesteps)
+process = GaussianDiffusion(beta_t)
+
+logger.info(f"{config = }")
+
+@hk.without_apply_rng
+@hk.transform
+# def network(t, y, x, mask):
+#     model = BiDimensionalAttentionModel(
+#         n_layers=config.network.n_layers,
+#         hidden_dim=config.network.hidden_dim,
+#         num_heads=config.network.num_heads,
+#     )
+#     return model(x, y, t, mask)
+def network(t, y, x, mask, x_context, y_context, mask_context):
+    # do task encoding step
+    task_encoder = SetEncoder(
+        mlp_layers=config.task_encoder.n_layers,
+        mlp_hidden_dim=config.task_encoder.hidden_dim,
+        mlp_output_dim=config.task_encoder.embed_dim,
+        use_self_attention=False,  # TODO # NOT IMPLEMENTED
+        self_attn_heads=4,  # TODO # NOT IMPLEMENTED
+    )
+    r = task_encoder(x_context, y_context, mask_context)  # [B, r_dim]
+    r = jnp.repeat(r[:, None, :], x.shape[1], axis=1)  # repeat across target points
+    x = jnp.concatenate([x, r], axis=-1)
+
+    # do the usual NDP step
+    model = BiDimensionalAttentionModel(
+        n_layers=config.network.n_layers,
+        hidden_dim=config.network.hidden_dim,
+        num_heads=config.network.num_heads,
+    )
+    return model(x, y, t, mask)
+
+
+@jax.jit
+# def net(params, t, yt, x, mask, *, key):
+#     del key  # the network is deterministic
+#     # NOTE: Network awkwardly requires a batch dimension for the inputs
+#     return network.apply(params, t[None], yt[None], x[None], mask[None])[0]
+@jax.jit
+def net(params, t, yt, x, mask, x_context, y_context, mask_context, *, key):
+    del key  # the network is deterministic
+    return network.apply(
+        params,
+        t[None],
+        yt[None],
+        x[None],
+        mask[None],
+        x_context[None],
+        y_context[None],
+        mask_context[None]
+    )[0]
+
+
+def loss_fn(params, batch: Batch, key):
+    net_with_params = partial(net, params)
+    kwargs = dict(num_timesteps=config.diffusion.timesteps, loss_type=config.loss_type)
+    return ndp.process.loss(process, net_with_params, batch, key, **kwargs)
+
+
+learning_rate_schedule = optax.warmup_cosine_decay_schedule(
+    init_value=config.optimizer.init_lr,
+    peak_value=config.optimizer.peak_lr,
+    warmup_steps=config.steps_per_epoch * config.optimizer.num_warmup_epochs,
+    decay_steps=config.steps_per_epoch * config.optimizer.num_decay_epochs,
+    end_value=config.optimizer.end_lr,
+)
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.scale_by_adam(),
+    optax.scale_by_schedule(learning_rate_schedule),
+    optax.scale(-1.0),
+)
+
+
+@jax.jit
+def init(batch: Batch, key: Rng) -> TrainingState:
+    key, init_rng = jax.random.split(key)
+    t = 1. * jnp.zeros((batch.x_target.shape[0]))
+    initial_params = network.init(
+        init_rng, t=t, y=batch.y_target, x=batch.x_target, mask=batch.mask_target,
+        x_context=batch.x_context,y_context=batch.y_context, mask_context=batch.mask_context,
+    )
+    initial_opt_state = optimizer.init(initial_params)
+    return TrainingState(
+        params=initial_params,
+        params_ema=initial_params,
+        opt_state=initial_opt_state,
+        key=key,
+        step=0,
+    )
+
+
+@jax.jit
+def ema_update(decay, ema_params, new_params):
+    def _ema(ema_params, new_params):
+        return decay * ema_params + (1.0 - decay) * new_params
+
+    return jax.tree_map(_ema, ema_params, new_params)
+
+# NEW------- grad checks
+from jax.tree_util import tree_map
+
+def grad_tree_summary(grads):
+    def summary(x):
+        return {
+            "shape": x.shape,
+            "any_nan": jnp.any(jnp.isnan(x)),
+            "min": jnp.min(x),
+            "max": jnp.max(x),
+        }
+
+    return tree_map(summary, grads)
+
+
+@jax.jit
+def update_step(state: TrainingState, batch: Batch) -> Tuple[TrainingState, Mapping]:
+    new_key, loss_key = jax.random.split(state.key)
+    loss_and_grad_fn = jax.value_and_grad(loss_fn)
+    loss_value, grads = loss_and_grad_fn(state.params, batch, loss_key)
+    # jax.debug.print(
+    #     "Loss: {}", loss_value
+    # )
+    # jax.debug.print(
+    #     "Grads: {}", grads
+    # )
+    # jax.debug.print("Global grad norm: {}", optax.global_norm(grads))
+    # summary = grad_tree_summary(grads)
+    # jax.debug.print("Gradient summary: {}", summary)
+
+    updates, new_opt_state = optimizer.update(grads, state.opt_state)
+    new_params = optax.apply_updates(state.params, updates)
+    new_params_ema = ema_update(config.optimizer.ema_rate, state.params_ema, new_params)
+    new_state = TrainingState(
+        params=new_params,
+        params_ema=new_params_ema,
+        opt_state=new_opt_state,
+        key=new_key,
+        step=state.step + 1
+    )
+    metrics = {
+        'loss': loss_value,
+        'step': state.step
+    }
+    return new_state, metrics
+
+
+@jax.jit
+def sample_prior(state: TrainingState, key: Rng):
+    x = jnp.linspace(-2, 3, 60)[:, None]
+    net_with_params = partial(net, state.params_ema)
+    y0 = process.sample(key, x, mask=None, model_fn=net_with_params)
+    return x, y0
+
+
+@jax.jit
+def sample_conditional(state: TrainingState, key: Rng):
+    x = jnp.linspace(-2, 3, 60)[:, None]
+    xc = jnp.array([-2., 0., 1.5]).reshape(-1, 1)
+    yc = jnp.array([-1., -0.1, 2.]).reshape(-1, 1)
+    net_with_params = partial(net, state.params_ema)
+    y0 = process.conditional_sample(key, x, mask=None, x_context=xc, y_context=yc, mask_context=None, model_fn=net_with_params)
+    return x, y0, xc, yc
+
+
+def plots(state: TrainingState, key: Rng):
+    if config.input_dim != 1: return {}  # only plot for 1D inputs
+    # prior
+    fig_prior, ax = plt.subplots()
+    x, y0 = jax.vmap(lambda k: sample_prior(state, k))(jax.random.split(key, 30))
+    ax.plot(x[...,0].T, y0[...,0].T, color="C0", alpha=0.5)
+
+    # conditional
+    fig_cond, ax = plt.subplots()
+    x, y0, xc, yc = jax.vmap(lambda k: sample_conditional(state, k))(jax.random.split(key, 30))
+    ax.plot(x[...,0].T, y0[...,0].T, "C0", alpha=0.5)
+    ax.plot(xc[...,0].T, yc[...,0].T, "C3o")
+    return {"prior": fig_prior, "conditional": fig_cond}
+
+
+batch_init = Batch(
+    x_target=jnp.zeros((config.batch_size, 10, config.input_dim)),
+    y_target=jnp.zeros((config.batch_size, 10, 1)),
+    x_context=jnp.zeros((config.batch_size, 10, config.input_dim)),
+    y_context=jnp.zeros((config.batch_size, 10, 1)),
+    mask_context=jnp.zeros((config.batch_size, 10)),
+    mask_target=jnp.zeros((config.batch_size, 10)),
+)
+state = init(batch_init, jax.random.PRNGKey(config.seed))
+
+experiment_dir_if_exists = HERE / config.restore
+if config.restore != "":
+    assert os.path.exists(experiment_dir_if_exists), f"Cannot restore from {config.restore} as path {experiment_dir_if_exists} does not exist..."
+    logger.info(f"Path {experiment_dir_if_exists} does exist!")
+else:
+    logger.warning(f"No restore specified... training from scratch.")
+
+if (experiment_dir_if_exists / "checkpoints").exists():
+    index = state_utils.find_latest_checkpoint_step_index(str(experiment_dir_if_exists))
+    if index is not None:
+        state = state_utils.load_checkpoint(state, str(experiment_dir_if_exists), step_index=index)
+        logger.info("Restored checkpoint at step {}".format(state.step))
+
+exp_root_dir = get_experiment_dir(config)
+# local_writer = writers.LocalWriter(str(exp_root_dir), flush_every_n=100)
+local_writer_train = writers.LocalWriter(str(exp_root_dir / "train"), flush_every_n=100)
+tb_writer = writers.TensorBoardWriter(get_experiment_dir(config, "tensorboard"))
+writer = writers.MultiWriter([tb_writer, local_writer_train])
+writer.log_hparams(asdict(config))
+
+all_actions_train = [
+    actions.PeriodicCallback(
+        every_steps=1,
+        callback_fn=lambda step, t, **kwargs: writer.write_scalars(step, kwargs["train_metrics"])
+    ),
+    actions.PeriodicCallback(
+        every_steps=config.total_steps // 4, #8,
+        callback_fn=lambda step, t, **kwargs: writer.write_figures(step, plots(kwargs["state"], kwargs["key"]))
+    ),
+    actions.PeriodicCallback(
+        every_steps= ( config.total_steps + 2) // 2, # so this will happen just at halfway mark
+        callback_fn=lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], exp_root_dir, step)
+    ),
+]
+
+ds_train: Dataset = get_data(
+    config.dataset,
+    input_dim=config.input_dim,
+    train=True,
+    batch_size=config.batch_size,
+    num_epochs=config.num_epochs,
+    test_turbine_id=TEST_TURBINE_ID,
+)
+
+steps = range(state.step + 1, config.total_steps + 1)
+progress_bar = tqdm.tqdm(steps)
+
+for step, batch in zip(progress_bar, ds_train):
+    # print(f"------------------------------- {step = } -------------------------------")
+    if step < state.step: continue  # wait for the state to catch up in case of restarts
+
+    state, train_metrics = update_step(state, batch)
+    train_metrics["lr"] = learning_rate_schedule(state.step)
+
+    for action in all_actions_train:
+        action(step, t=None, train_metrics=train_metrics, state=state, key=key)
+
+    if step % 10 == 0:
+        progress_bar.set_description(f"loss {train_metrics['loss']:.2f}")
+
+if config.restore == "":
+    # ensure we save the final model!
+    _save = lambda step, t, **kwargs: state_utils.save_checkpoint(kwargs["state"], exp_root_dir, step)
+    _save(step, t=None, state=state, key=key)
+
+    assert False # stop before testing!
+
+local_writer_test = writers.LocalWriter(str(exp_root_dir / "test"), flush_every_n=100)
+writer = writers.MultiWriter([tb_writer, local_writer_test])
+writer.log_hparams(asdict(config))
+
+logger.warning("EVALUATION")
+if config.eval.float64:
+    from jax.config import config as jax_config
+
+    jax_config.update("jax_enable_x64", True)
+
+net_with_params = partial(net, state.params_ema)
+n_samples_per_function = config.eval.n_samples_per_function
+
+
+@jax.jit
+@partial(jax.vmap, in_axes=(0, None, None, None, None))
+def sample_n_conditionals_with_repaint(key, x_test, x_context, y_context, mask_context):
+    return process.conditional_sample(
+        key, x_test, mask=None, x_context=x_context, y_context=y_context, mask_context=mask_context,
+        model_fn=net_with_params)
+
+# NEW - this allows us to use the context in the decoder but without doing repaint loops!
+@jax.jit
+@partial(jax.vmap, in_axes=(0, None, None, None, None))
+def sample_n_conditionals_no_repaint(key, x_test, x_context, y_context, mask_context):
+    return process.sample_conditional_on_context_no_repaint(
+        key, x_test, mask=None, x_context=x_context, y_context=y_context, mask_context=mask_context,
+        model_fn=net_with_params)
+
+def plot(batch):
+    batch_size = len(batch.x_context)
+    n = int(batch_size ** 0.5)
+    fig, axes = plt.subplots(n, n, figsize=(5, 5), sharex=True, sharey=True)
+    axes = np.array(axes).reshape(-1)
+    x_test = jnp.linspace(-3, 3, 50)[:, None]
+    for i in range(batch_size):
+        samples = sample_n_conditionals_with_repaint(
+            jax.random.split(jax.random.PRNGKey(42), 8),
+            x_test,
+            batch.x_context[i],
+            batch.y_context[i],
+            batch.mask_context[i],
+        )
+        mean, var = jnp.mean(samples, axis=0).squeeze(axis=1), jnp.var(samples, axis=0).squeeze(axis=1)
+        axes[i].plot(x_test, samples[..., 0].T, "C0", lw=1)
+        axes[i].plot(x_test, mean, "k")
+        axes[i].fill_between(
+            x_test.squeeze(axis=1),
+            mean - 1.96 * jnp.sqrt(var),
+            mean + 1.96 * jnp.sqrt(var),
+            color="k",
+            alpha=0.1,
+        )
+        xc = batch.x_context[i] + 1e3 * batch.mask_context[i][:, None]
+        axes[i].plot(xc, batch.y_context[i], "C3o")
+        axes[i].set_xlim(-2.05, 2.05)
+    return fig
+
+
+@jax.jit
+@partial(jax.vmap, in_axes=(None, 0, 0, 0, 0, 0))
+def eval_conditional(key, x_test, y_test, x_context, y_context, mask_context):
+    sample_fn = sample_n_conditionals_with_repaint if config.eval.n_conditional_sample_with_repaint \
+        else sample_n_conditionals_no_repaint
+    logger.warning(f"{config.eval.n_conditional_sample_with_repaint = }")
+    samples = sample_fn(jax.random.split(key, n_samples_per_function), x_test, x_context, y_context, mask_context)
+    samples = samples.squeeze(axis=-1)
+    mean = jnp.mean(samples, axis=0)
+    centered_samples = samples - mean
+    covariance = jnp.dot(centered_samples.T, centered_samples) / (samples.shape[0] - 1)
+    covariance = covariance + jnp.eye(covariance.shape[0]) * 1e-6
+    logger.info(f"Sample Shape: {samples.shape}")
+    logger.info(f"mean Shape: {mean.shape}")
+    logger.info(f"covariance Shape: {covariance.shape}")
+
+    logger.info(f"Calculating Posterior...")
+    # Hopefully works with gpjax == 0.5.9
+    post = GaussianDistribution(
+        loc=mean,#.squeeze(),
+        scale=jaxlinop.DenseLinearOperator(covariance),
+    )
+    logger.info(f"Calculating Log Likelihood...")
+    ll = post.log_prob(y_test.squeeze()) / len(x_test)
+
+    logger.info(f"Calculating MSE...")
+    mse = jnp.mean((post.mean() - y_test.squeeze()) ** 2)
+    num_context = len(x_context) - jnp.count_nonzero(mask_context)
+    ret = {"mse": mse, "ll": ll, "nc": num_context, "samples": samples}
+
+    logger.info(f"{ret = }")
+    return ret
+
+def summary_stats(metrics):
+    err = lambda v: 1.96 * jnp.std(v.reshape(-1)) / jnp.sqrt(len(v.reshape(-1)))
+    summary_stats = [("mean", jnp.mean), ("std", jnp.std), ("err", err)]
+    metrics = {f"{k}_{n}": s(jnp.stack(v)) for k, v in metrics.items() for n, s in summary_stats}
+    return metrics
+
+
+ds_test = get_data(
+    config.dataset,
+    input_dim=config.input_dim,
+    train=False,
+    batch_size=config.eval.batch_size,
+    num_epochs=1,
+    test_turbine_id=TEST_TURBINE_ID,
+)
+
+test_metrics = {"mse": [], "ll": [], "nc": []}
+
+from tqdm.contrib import tenumerate
+
+batch_save_dir = get_experiment_dir(config, "batches")
+total_num_batches = config.eval.total_steps
+for i, batch in tenumerate(ds_test, total=total_num_batches):
+    logger.info(f"Batch {i}")
+    if i >= total_num_batches:
+        break # have seen the desired number of samples
+
+    # hack to skip the ones we have form the no repaint, with no context points WITH will be same as WITHOUT REPAINT
+    if i % 3 == 0:
+        continue
+    batch_save_path = batch_save_dir/f"{i}.pkl"
+    if os.path.exists(batch_save_path):
+        logger.warning(f"Path {batch_save_path} already exists, skipping.")
+        continue # we have already processed this - likely the code then crasehd
+
+    # create placeholder pickle - this allows for "multiprocessing" by calling the script multiple times
+    with open(batch_save_path, "wb") as f:
+        logger.info(f"Creating placeholder file at {batch_save_path}")
+        pickle.dump(None, f)
+
+    key, ekey = jax.random.split(key)
+    logger.info(f"Evaluating Conditional {i}...")
+    m = eval_conditional(ekey, batch.x_target, batch.y_target, batch.x_context, batch.y_context, batch.mask_context)
+    logger.info(f"Done Evaluating Conditional {i}...")
+    for k, v in m.items():
+        if k != "samples":
+            test_metrics[k].append(v)
+    batch_to_pickle = (batch.to_dict(), m["samples"])
+    with open(batch_save_path, "wb") as f:
+        logger.info(f"Dumping batch and conditional samples in {batch_save_path}")
+        pickle.dump(batch_to_pickle, f)
+
+    logger.info(f"Getting Summary stats...")
+    summary = summary_stats(test_metrics)
+    logger.info(f"Done Getting Summary stats...")
+
+    logger.info(f"Writing Summary stats...")
+    summary = {"eval_" + k: v for k, v in summary.items()}
+    writer.write_scalars(i, summary)
+    logger.info(f"Done Writing Summary stats...")
+
+    # NOTE: no need to use this slow plot function as we dump out the pickle files now
+    # if config.input_dim == 1:
+    #     logger.info(f"Plotting Batch...")
+    #     fig = plot(batch)
+    #     writer.write_figures(i, {"eval_conditional_sample": fig})
+    #     logger.info(f"Done Plotting Batch...")
+
+test_metrics = summary_stats(test_metrics)
+pprint.pprint(test_metrics)
