@@ -1,7 +1,9 @@
-# Adhoc script to demonstrate diffusion process
+# Diffusion Process Demonstration
 
-main.py uses the config for the diffusion process specified in config.py. It is important that this config matches the config for the model being loaded (in this case the 3D model).
+This directory contains an ad hoc script demonstrating the diffusion process in the NDP framework.
 
-Notably, this includes specifying a pre-trained model to use for demonstration of the diffusion process.
+The `main.py` script uses the diffusion process configuration specified in `config.py`. **The configuration must match that of the pretrained model being loaded**, which, in this case, corresponds to the 3D model.
 
-In addition to specifying the model name and directory, it is possible to specify which checkpoint to reload in main.py.
+The configuration includes specifying the pretrained model used to demonstrate the forward and reverse diffusion processes.
+
+In addition to specifying the model name and directory, the checkpoint to be restored can be selected in `main.py`.
