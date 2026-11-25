@@ -1,9 +1,11 @@
-# Adhoc script to demonstrate task encoder
+# Task Encoder Demonstration
 
-This takes the confg specified in config.py to load a pretrained model. Onc eagain it is vital the config matches the config of the model loaded (in thisc case the 5D model for either test turbine 1 or 6).
+This directory contains an ad hoc script demonstrating the task encoder in the MT-NDP architecture.
 
-As with the diffusion demo, it is possible also to specify what checkpoitn to laod teh model in at in main.py
+The script uses the configuration specified in `config.py` to load a pretrained model. **The configuration must match that of the selected pretrained model**, which, in this case, corresponds to the 5D model for either test turbine 1 or 6.
 
-This takes the provided training / testing data and runs the samples through the task encoder.
+As with the diffusion demonstration, the checkpoint used to load the pretrained model can be specified in `main.py`.
 
-It then pickels the input batches (samples) and resulting encodings.
+The script processes the provided training and testing data by passing the input samples through the task encoder.
+
+Finally, the input batches (samples) and their corresponding task encodings are saved as serialised Python objects using `pickle`, allowing them to be loaded for subsequent analysis and visualisation.
