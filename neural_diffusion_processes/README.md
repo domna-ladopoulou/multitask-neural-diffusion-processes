@@ -1,7 +1,10 @@
-# NDP
+# Neural Diffusion Processes (NDP)
 
-This is almost exactly the same as in the original NDP developed in https://arxiv.org/abs/2206.03992 and the code was also provided at https://github.com/vdutor/neural-diffusion-processes
+This directory contains the original implementation of [Neural Diffusion Processes (NDP)](https://arxiv.org/abs/2206.03992), with minor modifications. The original source code is available in the [official GitHub repository](https://github.com/vdutor/neural-diffusion-processes).
 
-I made a few changes here to:
-1. save out data for all timesteps of the forward and backward processes, so we can visualise the diffusion
-2. added some minor logging as some steps of inference can be quite slow
+The implementation remains largely unchanged, with the following modifications:
+
+1. **Diffusion process visualisation:** The forward and reverse diffusion processes have been modified to save intermediate states at every timestep, enabling visualisation of the diffusion trajectories.
+2. **Additional logging:** Minor logging functionality has been introduced to facilitate monitoring of computationally intensive operations, particularly during inference.
+
+All other components of the original NDP implementation remain unchanged.
