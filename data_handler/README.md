@@ -1,6 +1,7 @@
-# Adhoc script to preprocess data
+# Data Preprocessing
 
-This saves out the training and testing data to \data.
+This directory contains an ad hoc script for preprocessing the data used in the experiments.
 
-This does so for different test turbines and with different input features as specified in prepare_data.py
+The script prepares and saves the training and testing datasets to the `data/` directory.
 
+Data preprocessing is performed for different test turbines and input feature configurations, as specified in `prepare_data.py`.
