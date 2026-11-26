@@ -39,3 +39,8 @@ The project uses Poetry for dependency management. If difficulties arise during 
 JAX is not included in the Poetry environment by default and must be installed separately. This allows users to select the appropriate installation for their hardware, including GPU acceleration.
 
 For further installation instructions and configuration details, please refer to [README.md](https://github.com/vdutor/neural-diffusion-processes).
+
+## Code Contributors
+
+- [Joseph Rawson](https://github.com/his-username](https://github.com/JosephRawson))
+- [Domna Ladopoulou](https://github.com/domna-ladopoulou)
