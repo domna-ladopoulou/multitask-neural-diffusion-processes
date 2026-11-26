@@ -1,6 +1,7 @@
 # School Examination Experiments
 
-This directory contains the MT-NDP architecture and configurations described in the accompanying paper for the school examination dataset.
+This directory contains the MT-NDP architecture and configurations described in the accompanying paper for the school examination dataset. The School Examination dataset (`Exam`) is publicly available
+through the R package [mlmRev](https://cran.r-project.org/package=mlmRev).
 
 # Files
 
