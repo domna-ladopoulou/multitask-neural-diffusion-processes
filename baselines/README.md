@@ -12,6 +12,4 @@ The neural-process implementations use **PyTorch**; the MT-GP implementation use
 
 ## Scope
 
-These files provide **model implementations only**, rather than end-to-end experiment reproduction. They do **not** include dataset loading or preprocessing, experimental configurations, training/fitting scripts, evaluation procedures, saved checkpoints, or reported results. The neural-process modules expose their training objectives and predictive sampling functions, but not the optimisation loops. The MT-GP module defines the covariance model but does not fit it.
-
-For the baseline descriptions and experimental protocol, refer to the paper's **Baseline Models**, **Experimental Setup and Implementation Details**, and **Baseline Implementation Details** sections.
+These files provide **model implementations**, rather than end-to-end experiment reproduction. For the baseline descriptions and experimental protocol, refer to the paper's **Baseline Models**, **Experimental Setup and Implementation Details**, and **Baseline Implementation Details** sections.
