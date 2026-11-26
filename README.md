@@ -24,7 +24,7 @@ Detailed instructions for running experiments, including the use of pretrained m
 
 Each experiment includes a configuration file specifying the model hyperparameters, training settings, and input features. Additional information is available in the README files within the respective experiment directories.
 
-# Additional Experiments
+### Additional Experiments
 
 The additional_experiments/ directory contains the model implementations and experimental configurations for the synthetic regression and School Examination datasets presented in the paper. Further details are provided in the README files within the respective subdirectories.
 
