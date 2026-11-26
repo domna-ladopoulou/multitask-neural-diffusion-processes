@@ -30,7 +30,7 @@ The experiments use publicly available data from [Kelmarsh Wind Farm, UK](https:
 
 Synthetic regression data are used to investigate the ability of MT-NDPs to learn shared representations across related tasks and generalise to previously unseen functions. The dataset consists of 25 synthetic regression tasks, with 20 used for training and five held out for evaluation. Each task is generated from a combination of sinusoidal, absolute-value, and hyperbolic tangent components, allowing the resulting functions to exhibit different nonlinear patterns and local changes. Inputs are sampled uniformly from the interval [-3, 3], with independent Gaussian observation noise of standard deviation 0.1.
 
-The School Examination (Exam) dataset is used as an additional real-world benchmark for multi-task regression. Originally described by Goldstein et al. (1993), the dataset contains examination results from 4,059 students across 65 schools. It includes normalised examination scores, student-level characteristics, and school-level information. Each school is treated as a separate task, allowing the evaluation of MT-NDPs on previously unseen schools using limited context observations.
+The School Examination dataset is used as an additional real-world benchmark for multi-task regression. Originally described by Goldstein et al. (1993), the dataset contains examination results from 4,059 students across 65 schools. It includes normalised examination scores, student-level characteristics, and school-level information. Each school is treated as a separate task, allowing the evaluation of MT-NDPs on previously unseen schools using limited context observations.
 
 ## Alternative Installation and JAX Support
 
